@@ -131,14 +131,26 @@ public:
 		remap_pls_variables();
 	}
 
-	CompilerGLSL(std::vector<uint32_t> spirv_)
+	explicit CompilerGLSL(std::vector<uint32_t> spirv_)
 	    : Compiler(move(spirv_))
 	{
 		init();
 	}
 
-	CompilerGLSL(const uint32_t *ir, size_t word_count)
-	    : Compiler(ir, word_count)
+	CompilerGLSL(const uint32_t *ir_, size_t word_count)
+	    : Compiler(ir_, word_count)
+	{
+		init();
+	}
+
+	explicit CompilerGLSL(const ParsedIR &ir_)
+	    : Compiler(ir_)
+	{
+		init();
+	}
+
+	explicit CompilerGLSL(ParsedIR &&ir_)
+	    : Compiler(std::move(ir_))
 	{
 		init();
 	}
@@ -209,6 +221,7 @@ protected:
 	virtual void emit_function_prototype(SPIRFunction &func, const Bitset &return_flags);
 
 	SPIRBlock *current_emitting_block = nullptr;
+	SPIRBlock *current_emitting_switch = nullptr;
 
 	virtual void emit_instruction(const Instruction &instr);
 	void emit_block_instructions(SPIRBlock &block);
@@ -223,6 +236,9 @@ protected:
 	virtual void emit_spv_amd_gcn_shader_op(uint32_t result_type, uint32_t result_id, uint32_t op, const uint32_t *args,
 	                                        uint32_t count);
 	virtual void emit_header();
+	void build_workgroup_size(std::vector<std::string> &arguments, const SpecializationConstant &x,
+	                          const SpecializationConstant &y, const SpecializationConstant &z);
+
 	virtual void emit_sampled_image_op(uint32_t result_type, uint32_t result_id, uint32_t image_id, uint32_t samp_id);
 	virtual void emit_texture_op(const Instruction &i);
 	virtual void emit_subgroup_op(const Instruction &i);
@@ -231,7 +247,7 @@ protected:
 	virtual void emit_struct_member(const SPIRType &type, uint32_t member_type_id, uint32_t index,
 	                                const std::string &qualifier = "", uint32_t base_offset = 0);
 	virtual std::string image_type_glsl(const SPIRType &type, uint32_t id = 0);
-	virtual std::string constant_expression(const SPIRConstant &c);
+	std::string constant_expression(const SPIRConstant &c);
 	std::string constant_op_expression(const SPIRConstantOp &cop);
 	virtual std::string constant_expression_vector(const SPIRConstant &c, uint32_t vector);
 	virtual void emit_fixup();
@@ -314,6 +330,7 @@ protected:
 	std::string type_to_array_glsl(const SPIRType &type);
 	std::string to_array_size(const SPIRType &type, uint32_t index);
 	uint32_t to_array_size_literal(const SPIRType &type, uint32_t index) const;
+	uint32_t to_array_size_literal(const SPIRType &type) const;
 	std::string variable_decl(const SPIRVariable &variable);
 	std::string variable_decl_function_local(SPIRVariable &variable);
 
@@ -329,6 +346,10 @@ protected:
 
 	std::unordered_set<std::string> local_variable_names;
 	std::unordered_set<std::string> resource_names;
+	std::unordered_set<std::string> block_input_names;
+	std::unordered_set<std::string> block_output_names;
+	std::unordered_set<std::string> block_ubo_names;
+	std::unordered_set<std::string> block_ssbo_names;
 	std::unordered_map<std::string, std::unordered_set<uint64_t>> function_overloads;
 
 	bool processing_entry_point = false;
@@ -344,7 +365,13 @@ protected:
 		bool long_long_literal_suffix = false;
 		const char *basic_int_type = "int";
 		const char *basic_uint_type = "uint";
+		const char *basic_int8_type = "int8_t";
+		const char *basic_uint8_type = "uint8_t";
+		const char *basic_int16_type = "int16_t";
+		const char *basic_uint16_type = "uint16_t";
 		const char *half_literal_suffix = "hf";
+		const char *int16_t_literal_suffix = "s";
+		const char *uint16_t_literal_suffix = "us";
 		bool swizzle_is_function = false;
 		bool shared_is_implied = false;
 		bool flexible_member_array_supported = true;
@@ -363,6 +390,7 @@ protected:
 		bool allow_truncated_access_chain = false;
 		bool supports_extensions = false;
 		bool supports_empty_struct = false;
+		bool array_is_value_type = true;
 	} backend;
 
 	void emit_struct(SPIRType &type);
@@ -377,6 +405,7 @@ protected:
 	void emit_flattened_io_block(const SPIRVariable &var, const char *qual);
 	void emit_block_chain(SPIRBlock &block);
 	void emit_hoisted_temporaries(std::vector<std::pair<uint32_t, uint32_t>> &temporaries);
+	std::string constant_value_macro_name(uint32_t id);
 	void emit_constant(const SPIRConstant &constant);
 	void emit_specialization_constant_op(const SPIRConstantOp &constant);
 	std::string emit_continue_block(uint32_t continue_block);
@@ -452,6 +481,7 @@ protected:
 	std::string enclose_expression(const std::string &expr);
 	void strip_enclosed_expression(std::string &expr);
 	std::string to_member_name(const SPIRType &type, uint32_t index);
+	virtual std::string to_member_reference(const SPIRVariable *var, const SPIRType &type, uint32_t index);
 	std::string type_to_glsl_constructor(const SPIRType &type);
 	std::string argument_decl(const SPIRFunction::Parameter &arg);
 	virtual std::string to_qualifiers_glsl(uint32_t id);
@@ -553,6 +583,7 @@ protected:
 	void find_static_extensions();
 
 	std::string emit_for_loop_initializers(const SPIRBlock &block);
+	void emit_while_loop_initializers(const SPIRBlock &block);
 	bool for_loop_initializers_are_same_type(const SPIRBlock &block);
 	bool optimize_read_modify_write(const SPIRType &type, const std::string &lhs, const std::string &rhs);
 	void fixup_image_load_store_access();
@@ -571,7 +602,7 @@ protected:
 	std::string convert_float_to_string(const SPIRConstant &value, uint32_t col, uint32_t row);
 	std::string convert_double_to_string(const SPIRConstant &value, uint32_t col, uint32_t row);
 
-	std::string convert_separate_image_to_combined(uint32_t id);
+	std::string convert_separate_image_to_expression(uint32_t id);
 
 	// Builtins in GLSL are always specific signedness, but the SPIR-V can declare them
 	// as either unsigned or signed.
@@ -582,10 +613,10 @@ protected:
 private:
 	void init()
 	{
-		if (source.known)
+		if (ir.source.known)
 		{
-			options.es = source.es;
-			options.version = source.version;
+			options.es = ir.source.es;
+			options.version = ir.source.version;
 		}
 	}
 };
